@@ -5,16 +5,17 @@ from langchain.schema.runnable import RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import MessagesPlaceholder
-from langchain.schema.agent import AgentFinish
 from dotenv import load_dotenv, find_dotenv
 from langchain.agents import AgentExecutor
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, Request, HTTPException
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
+from langchain_redis import RedisChatMessageHistory
 from pydantic import BaseModel, Field
 from datetime import datetime
-load_dotenv(find_dotenv())
 import os
+load_dotenv(find_dotenv())
+
 
 informações_necessarias = """
 # Data 
@@ -45,6 +46,7 @@ informações_necessarias = """
 - Você deve atribuir uma pontuação de sentimento (positivo, neutro, negativo) com base na entrada do usuário.
 """
 
+
 exemplos = """
 <exemplo 1>
 # Correção de Entrada Parcial:
@@ -70,6 +72,7 @@ exemplos = """
 </exemplo 2>
 """
 
+
 exemplos_listas = """
 # Usando '-' ao invés de '.'.
 1-Fulano de ciclano pelinous;
@@ -77,6 +80,7 @@ exemplos_listas = """
 3-Se popularizou na década de 60, quando a Letraset lançou decalques contendo passagens de Lorem Ipsum;
 4-Existem muitas variações disponíveis de passagens de Lorem Ipsum, mas a maioria sofreu algum tipo de alteração, seja por inserção de passagens com humor, ou palavras aleatórias que não parecem nem um pouco convincentes;
 """
+
 
 exemplos_listas = """
 - User: Today, we participated in an extensive compliance strategy session involving regulatory experts, legal teams, and compliance officers from multiple jurisdictions. The focus was on building a cohesive strategy to handle the rapidly evolving global regulatory landscape surrounding digital assets and fintech solutions. The session kicked off with a discussion on the recent developments from global regulatory bodies, including the Financial Action Task Force, FATF, the European Securities and Markets Authority, ESMA, and the U.S. Securities and Exchange Commission, SEC. The primary concern was ensuring compliance with anti-money laundering, TML, requirements, particularly with the implementation of the Travel Rule and enhanced KYC procedures across different regions. Among the key contributors were Sarah Bennett from the UK Financial Conduct 
@@ -97,8 +101,10 @@ E assim por diante, forneça uma lista com todas as informações.
 """
 
 
+app = FastAPI()
 api_key = os.getenv("OPENAI_API_KEY")
-chat = ChatOpenAI(model="gpt-4o-mini", openai_api_key=api_key)
+chat = ChatOpenAI(model="gpt-4o", openai_api_key=api_key)
+REDIS_URL = "redis://default:A1ZDEbkF87w7TR0MPTBREnTFOnBgfBw9@redis-14693.c253.us-central1-1.gce.redns.redis-cloud.com:14693/0"
 
 
 def obter_hora_e_data_atual():
@@ -126,8 +132,8 @@ class ExtraiInformacoes(BaseModel):
             ("Jane Doe is a Senior Regulatory Advisor at the Financial Conduct Authority (FCA) in the UK. I don't have her email ou phone number at the moment. ", "UK")
         ])
     representantes: str = Field(description="representantes dos contatos mencionados")
-    assunto: str = Field(description="assunto do texto, deve ser 'politica', 'economia' ou 'justica'.")
-    resumo: str = Field(description="resumo do texto, deve ser uma breve descrição do evento, com no máximo 100 caracteres.")
+    assunto: str = Field(description="assunto do texto")
+    resumo: str = Field(description="resumo do texto.")
     acoes_acompanhamento: str = Field(description="acoes de acompanhamento do texto.")
     sentimento: str = Field(description="sentimento expresso pelo individuo, deve ser 'positivo', 'negativo' ou 'neutro'.")
 
@@ -156,59 +162,60 @@ toolls_json = [convert_to_openai_function(tooll) for tooll in toolls]
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", f"Você é um assistente juridico que extrai informações do texto fornecido apenas quando todas as {informações_necessarias} estiverem presentes, e caso alguma delas não esteja, pergunte ao usuario antes de acionar a tool 'extrutura_informacao'. Pergunte uma coisa de cada vez até que todas as informações estejam presentes e você possa acionar o tool, fornecendo uma lista com todas informações contidas ao final. Para referencia a data atual é {data_atual}. Não utilize formatação markdown. Caso precise, sigo os exemplos em {exemplos}. Não use asteriscos '*' em suas mensagens. Proibido usar asteriscos '*' em suas mensagens. Proibido usar formatação markdown. Quando for listar algo, use '-' ao invés de '.' como nos exemplos {exemplos_listas}. REGRA: Para listar itens use o exemplo de {exemplos_listas}."),
-    MessagesPlaceholder(variable_name="chat_history"),
+    MessagesPlaceholder(variable_name="memory"),
     ("user", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad")
 ])
 
-memory = ConversationBufferMemory(
-    return_messages=True,
-    memory_key="chat_history"
-)
+
+def get_memory_for_user(whatsapp):
+    memory = RedisChatMessageHistory(
+        session_id=whatsapp, 
+        redis_url=REDIS_URL)
+    
+    return ConversationBufferMemory(
+        return_messages=True, 
+        memory_key="memory", 
+        chat_memory=memory)
+
 
 pass_through = RunnablePassthrough.assign(
     agent_scratchpad=lambda x: format_to_openai_function_messages(x["intermediate_steps"])
 )
-agent_chain = pass_through | prompt | chat.bind(functions=toolls_json) | OpenAIFunctionsAgentOutputParser()
 
 
-def run_agent(input):
-    passos_intermediarios = []
-    while True:
-        resposta = agent_chain.invoke({
-            "input": input,
-            "agent_scratchpad": format_to_openai_function_messages(passos_intermediarios)
-        })
-        if isinstance(resposta, AgentFinish):
-            return resposta
-        observacao = toolls[resposta.tool].run(resposta.tool_input)
-        passos_intermediarios.append((resposta, observacao))
-
-
-agent_executor = AgentExecutor(
-    agent=agent_chain,
-    memory=memory,
-    tools=toolls,
-    verbose=True,
-    return_intermediate_steps=True
-)
-
-app = Flask(__name__)
-
-@app.route("/webhook", methods=["POST"])
-def receive_message():
-    
+@app.post("/webhook")
+async def receive_message(request: Request):
     try:
-        body = request.data  
-        body_str = body.decode("utf-8")
-        print("Mensagem recebida:", body_str)  
-        resposta = agent_executor.invoke({"input": body_str})
+
+        chain = pass_through | prompt | chat.bind(functions=toolls_json) | OpenAIFunctionsAgentOutputParser()
+        
+        body = await request.json()
+        response = body["n8n_message"]
+        whatsapp_id = body['whatsapp_id']
+        print("Mensagem recebida:", body)
+        print(f"\n----------####### {whatsapp_id} #######------------")
+        print(f"----------####### {response} #######------------\n")
+
+        memoria = get_memory_for_user(whatsapp_id)
+        print("-----------------------", memoria, "-----------------------\n")
+
+        agent_executor = AgentExecutor(
+            agent=chain,
+            memory=memoria,
+            tools=toolls,
+            verbose=True,
+            return_intermediate_steps=True
+        )
+
+        resposta = agent_executor.invoke({"input": response})
         resposta_final = resposta["output"]
 
-        return jsonify({"Status": resposta_final})
+        return {"Status": resposta_final}
 
     except Exception as e:
-        return jsonify({"Erro": f"Falha ao processar JSON: {str(e)}"}), 500
-    
+        raise HTTPException(status_code=500, detail=f"Falha ao processar JSON: {str(e)}")
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
