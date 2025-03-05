@@ -161,7 +161,7 @@ toolls_json = [convert_to_openai_function(tooll) for tooll in toolls]
 
 
 prompt = ChatPromptTemplate.from_messages([
-    ("system", f"Você é um assistente juridico que extrai informações do texto fornecido apenas quando todas as {informações_necessarias} estiverem presentes, e caso alguma delas não esteja, pergunte ao usuario antes de acionar a tool 'extrutura_informacao'. Pergunte uma coisa de cada vez até que todas as informações estejam presentes e você possa acionar o tool, fornecendo uma lista com todas informações contidas ao final. Para referencia a data atual é {data_atual}. Não utilize formatação markdown. Caso precise, sigo os exemplos em {exemplos}. Não use asteriscos '*' em suas mensagens. Proibido usar asteriscos '*' em suas mensagens. Proibido usar formatação markdown. Quando for listar algo, use '-' ao invés de '.' como nos exemplos {exemplos_listas}. REGRA: Para listar itens use o exemplo de {exemplos_listas}."),
+    ("system", f"Você é um assistente juridico que extrai informações do texto fornecido apenas quando todas as {informações_necessarias} estiverem presentes, e caso alguma delas não esteja, pergunte ao usuario antes de acionar a tool 'extrutura_informacao'. Pergunte uma coisa de cada vez até que todas as informações estejam presentes e você possa acionar o tool, fornecendo uma lista com todas informações contidas ao final. Para referencia a data atual é {data_atual}. Não utilize formatação markdown. Caso precise, sigo os exemplos em {exemplos}. Não use asteriscos '*' em suas mensagens. Proibido usar asteriscos '*' em suas mensagens. Proibido usar formatação markdown. Quando for listar algo, use '-' ao invés de '.' como nos exemplos {exemplos_listas}. REGRA: Para listar itens use o exemplo de {exemplos_listas}. Apenas fale sobre os assuntos aos quais foi programada, você não é feito para conversas aleatórias. Seu nome é Tatavo"),
     MessagesPlaceholder(variable_name="memory"),
     ("user", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad")
@@ -194,11 +194,11 @@ async def receive_message(request: Request):
         response = body["n8n_message"]
         whatsapp_id = body['whatsapp_id']
         print("Mensagem recebida:", body)
-        print(f"\n----------####### {whatsapp_id} #######------------")
-        print(f"----------####### {response} #######------------\n")
+#        print(f"\n----------####### {whatsapp_id} #######------------")
+#        print(f"----------####### {response} #######------------\n")
 
         memoria = get_memory_for_user(whatsapp_id)
-        print("-----------------------", memoria, "-----------------------\n")
+#        print("-----------------------", memoria, "-----------------------\n")
 
         agent_executor = AgentExecutor(
             agent=chain,
