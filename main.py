@@ -10,9 +10,11 @@ from langchain.agents import AgentExecutor
 from fastapi import FastAPI, Request, HTTPException
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
+from langchain_core.tools import BaseTool
 from langchain_redis import RedisChatMessageHistory
 from pydantic import BaseModel, Field
 from datetime import datetime
+import requests
 import os
 load_dotenv(find_dotenv())
 
@@ -21,29 +23,26 @@ informações_necessarias = """
 # Data 
 - Deve ser capturada automaticamente com base no dia em que a interação ocorreu, e não quando foi registrada, e caso o usuário fornecer termos relativos como "ontem" ou "amanhã", o você deve pedir uma data específica para evitar ambiguidade.
 # Contatos 
-- Se apenas "reguladores" ou um órgão regulador for mencionado sem especificar indivíduos, você deve perguntar os nomes completos e as funções.Se apenas um primeiro ou último nome for fornecido, você deve adotar uma abordagem conversacional para extrair os detalhes completos do contato.
-# Função
+- Pessoas presentes na reunião.
+# Meio
+- Caso o usuario não mencione o meio, pergunte qual foi o meio utilizado (ex: Google Meet, presencial, etc...).
+# Organizações
+- A qual organização pertenciam os membros presentes na reunião. Se o usuário mencionar apenas a jurisdição, ou um nome parcial de um órgão regulador, você deve confirmar o nome completo da organização e garantir a especificidade da jurisdição.
+# Jurisdição
+- Deve ser identificada através das informações obtidas através da organização do contato, mas jamais pergunte isso diretamente (exemplo: BCRA, já esta implicito que se trata de Argentina).
+# Representantes da Empresa
+- Se o usuário não mencionar explicitamente representantes da empresa, você deve solicitar que confirmem se alguém de sua empresa participou.
+"""
+
+
+informações_necessarias_2 = """
+# Cargo
 - Se a função de um contato for mencionada de forma incompleta (por exemplo, "consultor", "gerente"), o Agente de IA deve pedir o título completo (por exemplo, "Consultor Chefe de Políticas" em vez de apenas "Consultor").
 - Se a função não estiver clara ou estiver faltando, o Agente de IA deve solicitar ao usuário que especifique a posição da pessoa dentro de sua organização.
 - Se o usuário fornecer apenas uma designação geral como "executivo" ou "oficial", o Agente de IA deve esclarecer a função do indivíduo (por exemplo, regulatória, conformidade, política, jurídica).
 - Se o contato for de um órgão regulador, confirme se ele está envolvido na formulação de políticas, supervisão ou aplicação da lei.
 - Se o contato for de uma empresa, confirme se sua função é em conformidade, política, jurídica ou relações governamentais.
 - Se o contato for de uma associação, confirme se ele é um representante da indústria, formulador de políticas ou especialista em defesa.
-# Organizações
-- Se o usuário mencionar apenas a jurisdição, abreviação ou um nome parcial de um órgão regulador, você deve confirmar o nome completo da organização e garantir a especificidade da jurisdição.
-# Jurisdição
-- Se estiver faltando, você deve confirmar o país ou região relacionada ao órgão ou entidade reguladora.
-# Representantes da Empresa
-- Se o usuário não mencionar explicitamente representantes da empresa, você deve solicitar que confirmem se alguém de sua empresa participou.
-# Assunto
-- Extraído diretamente da entrada do usuário, mas deve ser claro e conciso. Se vago, você deve primeiro dar uma opção e pedir esclarecimentos se não for aprovado pelo Usuário.
-# Conteúdo
-- Deve resumir os principais pontos da discussão. Se faltarem detalhes, solicite ao usuário que forneça insights ou conclusões específicas.
-# Ações de Acompanhamento
-- Se os acompanhamentos forem mencionados, você deve extrair prazos, responsáveis e próximas etapas específicas.
-- Se o usuário não mencionar ações de acompanhamento, pergunte se há alguma tarefa a ser concluída.
-# Sentimento Geral
-- Você deve atribuir uma pontuação de sentimento (positivo, neutro, negativo) com base na entrada do usuário.
 """
 
 
@@ -58,14 +57,11 @@ exemplos = """
 # Confirmando Acompanhamentos:
 - Usuário: "Discutimos atualizações de políticas."
 - IA: "Alguma ação de acompanhamento ou prazo específico foi mencionado?"
-# Garantindo Clareza do Sentimento:
-- Usuário: "Foi uma discussão interessante."
-- IA: "Você descreveria a interação como positiva, neutra ou negativa em termos de resultado?"
 </exemplo 1>
 
 <exemplo 2>
 1- Data: Você mencionou "ontem". Poderia me informar a data específica em que a conversa ocorreu?
-2- Contatos: Você se referiu a um representante do Banco Central do Brasil. Qual é o nome completo e a função desse representante?
+2- Contatos: Você se referiu a um representante do Banco Central do Brasil. Qual é o nome completo dele?
 3- Jurisdição: Presumo que estamos falando sobre o Brasil, está correto?
 4- Representantes da Empresa: Algum representante da sua empresa participou dessa conversa?
 5- Ações de Acompanhamento: Você mencionou que precisamos preparar documentação adicional. Há prazos ou responsáveis para essa tarefa?
@@ -79,25 +75,6 @@ exemplos_listas = """
 2-Lorem Ipsum é simplesmente uma simulação de texto da indústria tipográfica e de impressos, e vem sendo utilizado desde o século XVI, quando um impressor desconhecido pegou uma bandeja de tipos e os embaralhou para fazer um livro de modelos de tipos;
 3-Se popularizou na década de 60, quando a Letraset lançou decalques contendo passagens de Lorem Ipsum;
 4-Existem muitas variações disponíveis de passagens de Lorem Ipsum, mas a maioria sofreu algum tipo de alteração, seja por inserção de passagens com humor, ou palavras aleatórias que não parecem nem um pouco convincentes;
-"""
-
-
-exemplos_listas = """
-- User: Today, we participated in an extensive compliance strategy session involving regulatory experts, legal teams, and compliance officers from multiple jurisdictions. The focus was on building a cohesive strategy to handle the rapidly evolving global regulatory landscape surrounding digital assets and fintech solutions. The session kicked off with a discussion on the recent developments from global regulatory bodies, including the Financial Action Task Force, FATF, the European Securities and Markets Authority, ESMA, and the U.S. Securities and Exchange Commission, SEC. The primary concern was ensuring compliance with anti-money laundering, TML, requirements, particularly with the implementation of the Travel Rule and enhanced KYC procedures across different regions. Among the key contributors were Sarah Bennett from the UK Financial Conduct 
-Authority, who discussed the challenges in cross-border compliance, Michael Tanoka from Japan's Financial Services Agency, who emphasized the need for fintech innovation alongside regulatory oversight, and David Rodriguez from the USSEC, who focused on recent enforcement actions against non-compliant digital asset firms. One of the key challenges discussed was the inconsistency in regulatory expectations across jurisdictions. While some regulators are pushing for more stringent rules, others are still in the early stages of defining their approach to digital asset oversight. We debated the feasibility of creating a unified compliance framework that could adapt to these varying regulatory environments without imposing excessive operational burdens on fintech companies and digital asset service providers. We also explored the role of artificial intelligence and machine learning in compliance automation. AI-driven monitoring solutions were highlighted as a promising tool for improving fraud detection, automating reporting, and reducing compliance costs. However, concerns were raised regarding the ethical use of AI in compliance, particularly around data privacy and decision-making transparency. Another major topic was tax 
-compliance for digital assets. With OECD's push for a global tax framework and initiatives like the Cryptoasset Reporting Framework, CARF, exchanges, and financial institutions 
-must prepare for increased scrutiny in tax reporting. The discussion revolved around strategies for ensuring tax compliance without disrupting business operations. To conclude, 
-we outlined next steps, which included forming specialized task forces to address specific compliance challenges, improving cross-border regulatory cooperation, and investing in compliance technology solutions. This session was crucial in setting the groundwork for a more standardized and efficient compliance approach.
-- AI: Vou precisar de algumas informações adicionais para estruturar os dados corretamente. Você poderia me informar se essa reunião ocorreu hoje, ou em uma data diferente?
-- User: Ocorreu hoje.
-- AI:  Você mencionou reguladores. Poderia fornecer os nomes completos de Sarah Bennett, Michael Tanoka e David Rodriguez, bem como suas funções?
-- User: Estes nomes mesmo. Eles atuan no cargo xxxx e yyyy.
-- AI:  Pode confirmar o nome completo das organizações que eles representam?
-- User: Claro. xxxxx, yyyyy.
-- AI: As informações foram organizadas com sucesso. Se precisar de mais assistência ou tiver outras perguntas, não hesite em me avisar. Aqui esta uma lista com todas elas organizadas:
-Data: 24/02/2025
-Contatos: Sarah Bennett, Michael Tanoka e David Rodriguez pertencendo aos cargos xxxx, yyyy, zzzzz respectivamente.
-E assim por diante, forneça uma lista com todas as informações.
 """
 
 
@@ -127,14 +104,14 @@ class ExtraiInformacoes(BaseModel):
     cargo: str = Field(description="cargo dos contatos mencionados")
     organizacoes: str = Field(description="organizaçao dos contatos mencionados")
     jurisdicoes: str = Field(
-        description="jurisdições mencionadas",
+        description="Deve ser identificada através das informações obtidas através da organização do contato. BCRA, já esta implicito que se trata de Argentina).",
         examples=[
-            ("Jane Doe is a Senior Regulatory Advisor at the Financial Conduct Authority (FCA) in the UK. I don't have her email ou phone number at the moment. ", "UK")
+            ("Jane Doe is a Senior Regulatory Advisor at the Financial Conduct Authority (FCA) in the UK. I don't have her email ou phone number at the moment. ", "UK"),
+            ("BCRA, 'esta implicito que se trata de Argentina'")
         ])
     representantes: str = Field(description="representantes dos contatos mencionados")
     assunto: str = Field(description="assunto do texto")
     resumo: str = Field(description="resumo do texto.")
-    acoes_acompanhamento: str = Field(description="acoes de acompanhamento do texto.")
     sentimento: str = Field(description="sentimento expresso pelo individuo, deve ser 'positivo', 'negativo' ou 'neutro'.")
 
 
@@ -149,19 +126,58 @@ def extrutura_informacao(
         representantes: str, 
         assunto: str, 
         resumo: str, 
-        acoes_acompanhamento: str, 
         sentimento: str):
     
     """Extrutura as informações do texto"""
-    return data, contatos, meio, cargo, organizacoes, jurisdicoes, representantes, assunto, resumo, acoes_acompanhamento, sentimento
+    return data, contatos, meio, cargo, organizacoes, jurisdicoes, representantes, assunto, resumo, sentimento
 
 
-toolls = [extrutura_informacao]
+class BuscarPessoasSchema(BaseModel):
+    contato: str = Field(description="Nome ou parte do nome do contato.")
+    organization: str = Field(description="Nome da organização a ser buscada.")
+
+
+@tool(args_schema=BuscarPessoasSchema)
+def buscar_pessoas_tool(contato: str, organization: str):
+    """Busca contatos e organizações utilizando a API do Regdoor."""
+
+    url_contact = f"https://dev-api.regdoor.com/api/ai/contacts?query={contato}"
+    url_organization = f"https://dev-api.regdoor.com/api/ai/organizations?query={organization}"
+
+    try:
+        return_contacts = requests.get(url_contact)
+        return_contacts.raise_for_status()
+        return_organization = requests.get(url_organization)
+        return_organization.raise_for_status()
+
+    except requests.exceptions.HTTPError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    
+    contacts_list = return_contacts.json()['items']
+    organizations_list = return_organization.json()['items']
+
+    return {
+        "contacts": contacts_list,
+        "organizations": organizations_list
+    }
+
+
+toolls = [extrutura_informacao, buscar_pessoas_tool]
 toolls_json = [convert_to_openai_function(tooll) for tooll in toolls]
 
 
 prompt = ChatPromptTemplate.from_messages([
-    ("system", f"Você é um assistente juridico que extrai informações do texto fornecido apenas quando todas as {informações_necessarias} estiverem presentes, e caso alguma delas não esteja, pergunte ao usuario antes de acionar a tool 'extrutura_informacao'. Pergunte uma coisa de cada vez até que todas as informações estejam presentes e você possa acionar o tool, fornecendo uma lista com todas informações contidas ao final. Para referencia a data atual é {data_atual}. Não utilize formatação markdown. Caso precise, sigo os exemplos em {exemplos}. Não use asteriscos '*' em suas mensagens. Proibido usar asteriscos '*' em suas mensagens. Proibido usar formatação markdown. Quando for listar algo, use '-' ao invés de '.' como nos exemplos {exemplos_listas}. REGRA: Para listar itens use o exemplo de {exemplos_listas}. Apenas fale sobre os assuntos aos quais foi programada, você não é feito para conversas aleatórias. Seu nome é Tatavo"),
+    ("system", f"""
+        - Você é um assistente juridico que trabalha na Regdoor, seu trabalho é dividido em duas etapas:
+        1-Através do input você identifica o nome de quem se esta falando (contato) e onde ele trabalha (organização), para então utilizar a tool 'buscar_pessoas_tool' e obter as demais informações que retornarão do database.
+        2-Extrair as informações do texto quando todas as {informações_necessarias} estiverem presentes, após verificar se os textos fornecidos contem todas as informações necessarias, acionar a tool 'extrutura_informacao', caso alguma delas não esteja, pergunte ao usuario antes de acionar o tool.
+        - Você responde na lingua/idioma do usuario. 
+        - Seja direto e conciso, assim que tiver o nome e empresa de onde o usuario atua, usu a tool 'buscar_pessoas_tool' e retorne apenas seu nome completo e a organização em que trabalha, e caso não havendo o nome exato da pessoa naquela organização, retorne nomes similares dentro da mesma organização.
+        - Pergunte uma coisa de cada vez até que todas as informações estejam presentes e você possa acionar as devidas tools, fornecendo uma lista com todas informações obtidas com a tool 'extrutura_informacao' ao final da conversa.
+        - Faça apenas uma pergunta por vez.
+        - Sempre que o nome de alguém e sua organização estiver presentes na mensagem, pesquise no database utilizando a tool 'buscar_pessoas_tool'. 
+        - Para referencia a data atual é {data_atual}. Não utilize formatação markdown. Caso precise, sigo os exemplos em {exemplos}. Não use asteriscos '*' em suas mensagens. Proibido usar asteriscos '*' em suas mensagens. Proibido usar formatação markdown. Quando for listar algo, use '-' ao invés de '.' como nos exemplos {exemplos_listas}. REGRA: Para listar itens use o exemplo de {exemplos_listas}.
+        """),
     MessagesPlaceholder(variable_name="memory"),
     ("user", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad")
@@ -193,12 +209,13 @@ async def receive_message(request: Request):
         body = await request.json()
         response = body["n8n_message"]
         whatsapp_id = body['whatsapp_id']
+        
         print("Mensagem recebida:", body)
-#        print(f"\n----------####### {whatsapp_id} #######------------")
-#        print(f"----------####### {response} #######------------\n")
+        print(f"\n----------####### {whatsapp_id} #######------------")
+        print(f"----------####### {response} #######------------\n")
 
         memoria = get_memory_for_user(whatsapp_id)
-#        print("-----------------------", memoria, "-----------------------\n")
+        print("-----------------------", memoria, "-----------------------\n")
 
         agent_executor = AgentExecutor(
             agent=chain,
@@ -209,7 +226,7 @@ async def receive_message(request: Request):
         )
 
         resposta = agent_executor.invoke({"input": response})
-        resposta_final = resposta["output"]
+        resposta_final = resposta
 
         return {"Status": resposta_final}
 
